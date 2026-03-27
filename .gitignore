@@ -1,4 +1,31 @@
+# ── Rust ──────────────────────────────────────────
 /target
+**/*.rs.bk
+
+# ── Binários compilados (safety net fora de /target) ──
 /bin/
+*.exe
+*.pdb
+*.dll
+*.exp
+*.lib
+
+# ── macOS ─────────────────────────────────────────
 *.DS_Store
 .omc/
+
+# ── Windows ───────────────────────────────────────
+Thumbs.db
+Desktop.ini
+
+# ── IDE ───────────────────────────────────────────
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# ── Claude Code runtime state (deploy, não source) ──
+sessions/
+memory/
+config.ini
