@@ -2,13 +2,80 @@ use crate::config::Config;
 use crate::filter;
 use crate::{json_util, session};
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{BOOL, FALSE, TRUE};
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{
+    GenerateConsoleCtrlEvent, SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT,
+    CTRL_CLOSE_EVENT,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 
 static CHILD_PID: AtomicI32 = AtomicI32::new(-1);
+
+#[cfg(windows)]
+fn shell_cmd() -> (&'static str, &'static str) {
+    ("bash", "-c")
+}
+
+fn spawn_wrapped_command(cmd_str: &str) -> std::io::Result<Child> {
+    #[cfg(unix)]
+    {
+        Command::new("sh")
+            .arg("-c")
+            .arg(cmd_str)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+    }
+
+    #[cfg(windows)]
+    {
+        let (shell, flag) = shell_cmd();
+        let mut cmd = Command::new(shell);
+        cmd.arg(flag)
+            .arg(cmd_str)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        cmd.spawn()
+    }
+}
+
+fn spawn_passthrough_command(cmd_str: &str) -> std::io::Result<ExitStatus> {
+    #[cfg(unix)]
+    {
+        Command::new("sh").arg("-c").arg(cmd_str).status()
+    }
+
+    #[cfg(windows)]
+    {
+        let (shell, flag) = shell_cmd();
+        Command::new(shell).arg(flag).arg(cmd_str).status()
+    }
+}
+
+fn terminate_child_group(child: &Child) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGTERM);
+    }
+
+    #[cfg(windows)]
+    unsafe {
+        let _ = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id());
+    }
+}
 
 pub fn run(cmd_str: &str) -> i32 {
     setup_signals();
@@ -20,15 +87,8 @@ pub fn run(cmd_str: &str) -> i32 {
 
     let start = Instant::now();
 
-    // Spawn via sh -c to handle pipes, &&, redirections, builtins
-    let mut child = match Command::new("sh")
-        .arg("-c")
-        .arg(cmd_str)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-    {
+    // Spawn via shell -c to handle pipes, &&, redirections, builtins
+    let mut child = match spawn_wrapped_command(cmd_str) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("squeez: {}", e);
@@ -76,9 +136,7 @@ pub fn run(cmd_str: &str) -> i32 {
             Ok(Some(s)) => break s.code().unwrap_or(1),
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    unsafe {
-                        libc::kill(-(child.id() as i32), libc::SIGTERM);
-                    }
+                    terminate_child_group(&child);
                     std::thread::sleep(Duration::from_millis(200));
                     let _ = child.kill();
                     eprintln!("squeez: command timed out after 120s");
@@ -148,14 +206,10 @@ pub fn run(cmd_str: &str) -> i32 {
 }
 
 fn passthrough(cmd: &str) -> i32 {
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("squeez: {}", e);
-            std::process::exit(1);
-        });
+    let status = spawn_passthrough_command(cmd).unwrap_or_else(|e| {
+        eprintln!("squeez: {}", e);
+        std::process::exit(1);
+    });
     status.code().unwrap_or(1)
 }
 
@@ -166,6 +220,7 @@ fn is_streaming(cmd: &str) -> bool {
         && cmd.split_whitespace().any(|a| a == "-f" || a == "--follow")
 }
 
+#[cfg(unix)]
 fn setup_signals() {
     unsafe {
         libc::signal(libc::SIGTERM, forward_signal as *const () as libc::sighandler_t);
@@ -173,12 +228,34 @@ fn setup_signals() {
     }
 }
 
+#[cfg(windows)]
+fn setup_signals() {
+    unsafe {
+        let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), TRUE);
+    }
+}
+
+#[cfg(unix)]
 extern "C" fn forward_signal(sig: libc::c_int) {
     let pid = CHILD_PID.load(Ordering::SeqCst);
     if pid > 0 {
         unsafe {
             libc::kill(-pid, sig);
         }
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
+    match ctrl_type {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT => {
+            let pid = CHILD_PID.load(Ordering::SeqCst);
+            if pid > 0 {
+                let _ = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid as u32);
+            }
+            TRUE
+        }
+        _ => FALSE,
     }
 }
 

@@ -3,15 +3,26 @@ use std::path::{Path, PathBuf};
 
 // ── Directory helpers ──────────────────────────────────────────────────────
 
+fn home_dir() -> String {
+    #[cfg(unix)]
+    {
+        std::env::var("HOME").unwrap_or_default()
+    }
+
+    #[cfg(windows)]
+    {
+        std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_default()
+    }
+}
+
 /// Returns the squeez state directory. Overridable via SQUEEZ_DIR env var (for tests).
 pub fn squeez_dir() -> PathBuf {
     if let Ok(d) = std::env::var("SQUEEZ_DIR") {
         return PathBuf::from(d);
     }
-    PathBuf::from(format!(
-        "{}/.claude/squeez",
-        std::env::var("HOME").unwrap_or_default()
-    ))
+    PathBuf::from(format!("{}/.claude/squeez", home_dir()))
 }
 
 pub fn sessions_dir() -> PathBuf {
@@ -131,7 +142,7 @@ impl CurrentSession {
                 let _ = f.write_all(json.as_bytes());
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
             let _ = std::fs::write(path, json);
         }
@@ -159,7 +170,7 @@ pub fn append_event(sessions_dir: &Path, session_file: &str, event_json: &str) {
             let _ = writeln!(f, "{}", event_json);
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
